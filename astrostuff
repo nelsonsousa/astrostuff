@@ -1,0 +1,513 @@
+#!/bin/bash
+#
+# Astrostuff: a Raspbery Pi image builder for astronomy
+# Copyright (C) 2025 Nelson Sousa (nsousa@gmail.com)
+#
+# Astrostuff is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Lesser General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# Astrostuff is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public License
+# along with Astrostuff.  If not, see <https://www.gnu.org/licenses/>.
+set -e
+
+
+usage() {
+  cat <<'EOF' | less -R
+astrostuff - Create your own Raspberry Pi images for astronomy
+
+Usage: astrostuff [topic] [command] [repository[/driver]]
+
+astrostuff full
+  Runs the entire process end-to-end. This may take several hours.
+  It will build the docker image, start the container, clone and build
+  all software (Indi, Kstars, PHD2, etc.), package it as .deb files,
+  build the Raspberry Pi image from scratch and produce a .img file
+  that can be flashed to an SD card.
+
+astrostuff docker build
+  Builds the docker container image with all necessary dependencies
+
+astrostuff docker start
+  Starts the docker container. If the container doesn't exist, creates it.
+  Builds the image if it doesn't yet exist.
+
+astrostuff docker attach
+  Runs a bash prompt in the container (for manual builds, step by step).
+  Stars the container if it's not yet started.
+
+astrostuff docker stop
+  Stops the container if it's running.
+
+astrostuff docker remove
+  Removes the container from docker. Will stop it first if it's still running.
+
+astrostuff docker clean
+  Removes the docker container, image and volume to clear disk space.
+  The whole process will take around 50-60 Gb of disk space that can be cleared
+  afterwards.
+
+astrostuff astro clone [repository[/driver]]
+  Clones the astronomy source code from its respective repositories.
+  If no repository is specified, all will be cloned: indi, indi-lib,
+  indi-3rdparty, kstars, stellarsolver, phd2.
+
+astrostuff astro update [repository[/driver]]
+  Updates the git repository to the latest stable release. Like above, will
+  update all repositories if none is specified.
+
+astrostuff astro clean [repository[/driver]]
+  Removes the build target of the repository/driver. Recommended before a new build
+  if there are cmake errors.
+
+astrostuff astro build [repository[/driver]]
+  Compiles the source code of the repository. It's recommended to build
+  all repositories, due to dependencies, unless you've previously built
+  and install all repositories and are building changes to the code.
+
+astrostuff astro install [repository[/driver]]
+  Installs the compiled binaries in the container's default location (some
+  code has dependencies that must be installed prior to the build process)
+
+astrostuff astro package [repository[/driver]]
+  Packages the compiled binaries as a .deb file. Will package all built
+  repositories if none is specified.
+
+astrostuff astro all [repository[/driver]]
+  Clones, updates, cleans, builds, installs and packages repository/driver.
+
+astrostuff image
+  Builds the Raspberry Pi image file: runs the pi-gen process from
+  stage0 to stage4 plus the newly created stage4-astrostuff and packages
+  the filesystem as an img file for flashing.
+
+astrostuff deploy
+  Uploads and installs previously built and packaged .deb files to the
+  Astrostuff host
+
+astrostuff backup
+  Copies user configuration files from Astrostuff host to backup folder.
+  This utility backs up two types of files: system files (normally
+  owned by root:root) and user files (normally located in the user's home
+  folder and owned by it)
+
+astrostuff restore
+  Uploads local backup configuration files to Astrostuff host.
+
+astrostuff full
+  Builds and packages all repositories and creates the Raspberry Pi image.
+
+Implemented repositories/drivers:
+- indi
+- indi-3rdparty/libplayerone
+- indi-3rdparty/indi-playerone
+- indi-3rdparty/indi-sx
+- stellarsolver
+- kstars
+- phd2
+
+Requirements:
+To run astrostuff an environment file, astrostuff.env is necessary.
+This file will hold all necessary variables to customise the Raspberry Pi
+image. If it doesn't exist, a generic astrostuff.env.default file will be
+used. However, this file can't be used until an SSH key is generated and
+updated in the respective variables.
+
+If the specified ssh key doesn't exist in the host, a new key will be
+generated, and it will be added to the ssh config file for ease of use
+in the future.
+
+Astrostuff runs within a Docker container. Download and install the most
+recent version of Docker in order to run.
+
+Known issues:
+When building some indi-3rdparty drivers often Cmake can't find a library
+or include folder, even though the correct package is installed. The solution
+is to pass the specific paths as Cmake command line arguments, such as
+
+$ cmake (...) -DCMAKE_VARIABLE=/path/to/include/or/library
+
+
+See the README.md file or check the git repository
+https://github.com/nelsonsousa/astrostuff.git
+EOF
+
+}
+
+PWD=$(dirname "$0")
+ASTROSTUFF_ROOT=$(cd "$PWD" && pwd)
+
+if [ ! -f ${ASTROSTUFF_ROOT}/astrostuff.env ]; then
+  cp ${ASTROSTUFF_ROOT}/samples/astrostuff.env ${ASTROSTUFF_ROOT}/astrostuff.env
+fi
+source ${ASTROSTUFF_ROOT}/astrostuff.env
+
+ASTROSTUFF_CLI_TOPIC="$1"
+ASTROSTUFF_CLI_COMMAND="$2"
+ASTROSTUFF_CLI_REPOSITORY="$3"
+
+: ${ASTROSTUFF_DOCKER_IMAGE:="astrostuff/builder"}
+: ${ASTROSTUFF_DOCKER_CONTAINER:="astrostuff-builder"}
+: ${ASTROSTUFF_DOCKER_VOLUME:="astrostuff-work"}
+
+
+: ${ASTROSTUFF_BACKUP_DIR:="${ASTROSTUFF_ROOT}/backup"}
+BACKUP_USER_ITEMS=(
+  ".indi"
+  ".indigo"
+  ".config/kstarsrc"
+  ".local/share/kstars/*.sqlite"
+  "bin"
+  "Desktop"
+  "Wallpaper"
+)
+BACKUP_SYSTEM_ITEMS=(
+  "/etc/systemd/timesyncd.conf"
+  "/etc/NetworkManager/system-connections/*.nmconnection"
+)
+BACKUP_RSYNC="rsync"
+BACKUP_RSYNC_OPTS="-av --relative --progress --no-links --numeric-ids --fake-super"
+BACKUP_RSYNC_SSH_KEY=(-e "ssh -i $ASTROSTUFF_SSH_KEY")
+
+mkdir -p "$ASTROSTUFF_BACKUP_DIR/user"
+mkdir -p "$ASTROSTUFF_BACKUP_DIR/system"
+
+
+ssh_keygen () {
+  if [ ! -f ${ASTROSTUFF_SSH_KEY} ]; then
+    echo "Generating new SSH key..."
+    ssh-keygen -t ed25519 -f ${ASTROSTUFF_SSH_KEY} -N ""
+
+    cat >> ${HOME}/.ssh/config << EOF
+
+#Astrostuff ssh connection
+Host ${ASTROSTUFF_HOSTNAME}
+    Hostname ${ASTROSTUFF_FQDN}
+    User ${ASTROSTUFF_USER}
+    IdentityFile ${ASTROSTUFF_SSH_KEY}
+
+EOF
+  fi
+
+  NEW_ASTROSTUFF_SSH_PUB_KEY="$(cat ${ASTROSTUFF_SSH_KEY}.pub)"
+  if [ "${NEW_ASTROSTUFF_SSH_PUB_KEY}" != "${ASTROSTUFF_SSH_PUB_KEY}" ]; then
+    sed -i '' "s/^ASTROSTUFF_SSH_PUB_KEY=.*/ASTROSTUFF_SSH_PUB_KEY=\"${NEW_ASTROSTUFF_SSH_PUB_KEY}\"/g" ${ASTROSTUFF_ROOT}/astrostuff.env
+    ASTROSTUFF_SSH_PUB_KEY="${NEW_ASTROSTUFF_SSH_PUB_KEY}"
+    echo "SSH public key updated in astrostuff.env"
+  fi
+}
+
+docker_image_exists () {
+  id=$(docker image ls --filter "reference=${ASTROSTUFF_DOCKER_IMAGE}" -q)
+  if [ -n "$id" ]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+docker_container_exists () {
+  id=$(docker ps -a --filter "name=${ASTROSTUFF_DOCKER_CONTAINER}" -q)
+  if [ -n "$id" ]; then
+    return 0
+  else
+    return 1
+  fi
+}
+docker_container_running () {
+  id=$(docker ps --filter "name=${ASTROSTUFF_DOCKER_CONTAINER}" -q)
+  if [ -n "$id" ]; then
+    return 0
+  else
+    return 1
+  fi
+}
+docker_volume_exists (){
+  id=$(docker volume ls --filter "name=${ASTROSTUFF_DOCKER_VOLUME}" -q)
+  if [ -n "$id" ]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+docker_build () {
+  docker buildx build --platform linux/arm64 -t ${ASTROSTUFF_DOCKER_IMAGE} ${ASTROSTUFF_ROOT}
+}
+
+docker_volume_create () {
+  ! docker_volume_exists && docker volume create ${ASTROSTUFF_DOCKER_VOLUME}
+}
+
+docker_start () {
+  if ! docker_image_exists; then
+    echo "${ASTROSTUFF_DOCKER_IMAGE} Docker image not found. Building..."
+    docker_build
+  fi
+  if ! docker_container_exists; then
+    # Container doesn't exist, start it.
+    if ! docker_volume_exists; then
+      # Create docker volume
+      docker_volume_create
+    fi
+    docker run -it \
+               --privileged \
+               -v "${ASTROSTUFF_DOCKER_VOLUME}":/astrostuff-work \
+               -v "${ASTROSTUFF_ROOT}":/astrostuff \
+               --name "${ASTROSTUFF_DOCKER_CONTAINER}" \
+               -d "${ASTROSTUFF_DOCKER_IMAGE}"
+    echo "${ASTROSTUFF_DOCKER_CONTAINER} is now running. You can log into it with astrostuff docker attach"
+  elif ! docker_container_running; then
+    echo "${ASTROSTUFF_DOCKER_CONTAINER} container is stopped. Restarting."
+    docker start ${ASTROSTUFF_DOCKER_CONTAINER}
+    echo "${ASTROSTUFF_DOCKER_CONTAINER} is now running. You can log into it with astrostuff docker attach"
+  else
+    echo "${ASTROSTUFF_DOCKER_CONTAINER} container is already running. You can log into it with astrostuff docker attach"
+  fi
+}
+
+docker_stop () {
+  if docker_container_running; then
+      echo "Stopping ${ASTROSTUFF_DOCKER_CONTAINER}..."
+      docker stop ${ASTROSTUFF_DOCKER_CONTAINER}
+      echo "${ASTROSTUFF_DOCKER_CONTAINER} is stopped."
+  else
+    echo "${ASTROSTUFF_DOCKER_CONTAINER} container is already stopped."
+  fi
+}
+
+docker_attach () {
+  if ! docker_container_running; then
+    echo "${ASTROSTUFF_DOCKER_CONTAINER} container not running. Starting it..."
+    docker_start
+  fi
+  docker exec -it ${ASTROSTUFF_DOCKER_CONTAINER} /bin/bash
+}
+
+docker_exec () {
+  if ! docker_container_running; then
+    echo "${ASTROSTUFF_DOCKER_CONTAINER} container not running. Starting it..."
+    docker_start
+  fi
+  docker exec -it ${ASTROSTUFF_DOCKER_CONTAINER} /bin/bash -c "${DOCKER_START_CMD}"
+}
+
+docker_remove () {
+  if docker_container_exists; then
+    if docker_container_running; then
+        echo "${ASTROSTUFF_DOCKER_CONTAINER} it still running."
+        docker_stop
+    fi
+    docker rm ${ASTROSTUFF_DOCKER_CONTAINER}
+    echo "${ASTROSTUFF_DOCKER_CONTAINER} was removed."
+  else
+    # Container doesn't exist.
+    echo "Container ${ASTROSTUFF_DOCKER_CONTAINER} doesn't exist."
+  fi
+}
+
+docker_image_remove () {
+  docker_container_exists && docker_remove
+  docker_image_exists && docker image rm ${ASTROSTUFF_DOCKER_IMAGE}
+  echo "${ASTROSTUFF_DOCKER_IMAGE} image removed"
+}
+
+docker_volume_remove () {
+  docker_container_exists && docker_remove
+  docker_volume_exists && docker volume rm ${ASTROSTUFF_DOCKER_VOLUME}
+  echo "${ASTROSTUFF_DOCKER_VOLUME} volume deleted"
+}
+
+clean () {
+  docker_remove
+  docker_volume_remove
+  docker_image_remove
+  echo "All clear: docker container, image and volume are now removed."
+}
+
+docker_cmd () {
+  case "${ASTROSTUFF_CLI_COMMAND}" in
+    "build")
+      docker_build
+      ;;
+    "start")
+      docker_start
+      ;;
+    "attach")
+      docker_attach
+      ;;
+    "stop")
+      docker_stop
+      ;;
+    "remove")
+      docker_remove
+      ;;
+    *)
+      echo "Unknown command '${ASTROSTUFF_CLI_COMMAND}'."
+      usage
+      ;;
+  esac
+}
+
+astro_cmd () {
+  OPTS="-"
+  case "${ASTROSTUFF_CLI_COMMAND}" in
+    "clone")
+      OPTS="${OPTS}C"
+      ;;
+    "update")
+      OPTS="${OPTS}U"
+      ;;
+    "build")
+      OPTS="${OPTS}B"
+      ;;
+    "install")
+      OPTS="${OPTS}I"
+      ;;
+    "package")
+      OPTS="${OPTS}P"
+      ;;
+    "all")
+      OPTS="-CUBIP"
+      ;;
+    *)
+      echo "Unknown command '${ASTROSTUFF_CLI_COMMAND}'."
+      usage
+      exit 1
+      ;;
+  esac
+  DOCKER_START_CMD="astrostuff-build.sh ${OPTS} ${ASTROSTUFF_CLI_REPOSITORY}"
+  docker_exec ${DOCKER_START_CMD}
+}
+
+image () {
+  DOCKER_START_CMD="astrostuff-image.sh"
+  docker_exec ${DOCKER_START_CMD}
+}
+
+backup_item () {
+  local item="$1"
+  local dest_dir="$2"
+  local use_sudo="$3"
+
+  if [ "$use_sudo" == "yes" ]; then
+    RSYNC_PATH_OPT=(--rsync-path "sudo rsync")
+  else
+    RSYNC_PATH_OPT=()
+  fi
+
+  echo "Backing up remote item: $item"
+  remote_arg="${ASTROSTUFF_USER}@${ASTROSTUFF_HOSTNAME_FQDN}:${item}"
+  $BACKUP_RSYNC $BACKUP_RSYNC_OPTS "${BACKUP_RSYNC_OPTS[@]}" "${BACKUP_RSYNC_SSH_KEY[@]}" $remote_arg $dest_dir
+}
+
+restore_item () {
+  # TO DO - Do this
+
+  local item="$1"
+  local src_base="$2"
+  local target_base="$3"
+  local use_sudo="$4"
+
+  # Convert item to relative path (e.g. /etc/hosts -> ./etc/hosts)
+  local rel_item="./${item#/}"
+  local source_path="$src_base/$rel_item"
+  local remote_dest="${ASTROSTUFF_USER}@${ASTROSTUFF_HOSTNAME}:${target_base}"
+
+  if [ "$use_sudo" == "yes" ]; then
+    RSYNC_PATH_OPT=(--rsync-path "sudo rsync")
+  else
+    RSYNC_PATH_OPT=()
+  fi
+
+  echo "Restoring item: $item"
+  # Build the restore rsync command as an array.
+  $RSYNC $COMMON_OPTS "${RSYNC_PATH_OPT[@]}" "${RSYNC_SSH_OPT[@]}" $source_path $remote_dest
+}
+
+backup () {
+  for item in "${BACKUP_USER_ITEMS[@]}"; do
+    backup_item "/home/${ASTROSTUFF_USER}/$item" "$BACKUP_DIR/user" "no"
+  done
+  # Backup system items (which require sudo on the Pi)
+  for item in "${BACKUP_SYSTEM_ITEMS[@]}"; do
+    backup_item "$item" "$BACKUP_DIR/system" "yes"
+  done
+}
+
+restore () {
+  for item in "${USER_ITEMS[@]}"; do
+    restore_item "$item" "$BACKUP_DIR/user" "/home/${ASTROSTUFF_USER}" "no"
+  done
+  # Restore system items (using sudo on the Pi)
+  for item in "${SYSTEM_ITEMS[@]}"; do
+    restore_item "$item" "$BACKUP_DIR/system" "/" "yes"
+  done
+}
+
+deploy () {
+  if [ -f "${ASTROSTUFF_ROOT}/dist/*.deb" ]; then
+    rsync -av --relative --progress -e "ssh -i ${ASTROSTUFF_SSH_KEY}" ${ASTROSTUFF_ROOT}/dist/*.deb ${ASTROSTUFF_USER}@${ASTROSTUFF_FQDN}:/home/${ASTROSTUFF_USER}/dist
+    ssh -i ${ASTROSTUFF_SSH_KEY} ${ASTROSTUFF_USER}@${ASTROSTUFF_FQDN} "sudo dpkg -i /home/${ASTROSTUFF_USER}/dist/*.deb"
+  else
+    echo "Nothing to deploy."
+  fi
+
+}
+
+# Check if ssh key exists and create one if not.
+ssh_keygen
+
+
+case "${ASTROSTUFF_CLI_TOPIC}" in
+  "help")
+    usage
+    exit 0
+    ;;
+  "full")
+    clean
+    ASTROSTUFF_CLI_COMMAND="all"
+    astro_cmd
+    image
+    ;;
+  "docker")
+    docker_cmd ${ASTROSTUFF_CLI_COMMAND}
+    ;;
+  "astro")
+    astro_cmd ${ASTROSTUFF_CLI_COMMAND} ${ASTROSTUFF_CLI_REPOSITORY}
+    ;;
+  "image")
+    image
+    ;;
+  "backup")
+    deploy
+    ;;
+  "restore")
+    restore
+    ;;
+  "deploy")
+    deploy
+    ;;
+  "clean")
+    clean
+    ;;
+  *)
+    echo "Unknown topic '${ASTROSTUFF_CLI_TOPIC}'."
+    usage
+    exit 1
+    ;;
+esac
+
+echo "
+
+Astrostuff process finished successfully.
+
+"
+
+exit 0
