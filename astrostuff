@@ -158,22 +158,36 @@ ASTROSTUFF_CLI_REPOSITORY="$3"
 
 
 : ${ASTROSTUFF_BACKUP_DIR:="${ASTROSTUFF_ROOT}/backup"}
+
 BACKUP_USER_ITEMS=(
   ".indi"
   ".indigo"
-  ".config/kstarsrc"
+  ".config"
+  ".PHDGuidingV2"
   ".local/share/kstars/*.sqlite"
   "bin"
   "Desktop"
   "Wallpaper"
 )
+
 BACKUP_SYSTEM_ITEMS=(
   "/etc/systemd/timesyncd.conf"
   "/etc/NetworkManager/system-connections/*.nmconnection"
 )
+
+BACKUP_EXCLUDE_ITEMS=(
+  ".config/chromium"
+)
+
 BACKUP_RSYNC="rsync"
-BACKUP_RSYNC_OPTS="-av --relative --progress --no-links --numeric-ids --fake-super"
-BACKUP_RSYNC_SSH_KEY=(-e "ssh -i $ASTROSTUFF_SSH_KEY")
+BACKUP_RSYNC_OPTS="-av --relative --progress"
+RESTORE_RSYNC_OPTS="-av --progress"
+RSYNC_SSH_KEY="-e \"ssh -i $ASTROSTUFF_SSH_KEY\""
+
+BACKUP_EXCLUDES=()
+for ex in "${BACKUP_EXCLUDE_ITEMS[@]}"; do
+  BACKUP_EXCLUDES+=" --exclude=\"$ex\""
+done
 
 mkdir -p "$ASTROSTUFF_BACKUP_DIR/user"
 mkdir -p "$ASTROSTUFF_BACKUP_DIR/system"
@@ -397,58 +411,67 @@ backup_item () {
   local use_sudo="$3"
 
   if [ "$use_sudo" == "yes" ]; then
-    RSYNC_PATH_OPT=(--rsync-path "sudo rsync")
+    RSYNC_PATH_OPT="--rsync-path \"sudo rsync\""
   else
     RSYNC_PATH_OPT=()
   fi
 
   echo "Backing up remote item: $item"
-  remote_arg="${ASTROSTUFF_USER}@${ASTROSTUFF_HOSTNAME_FQDN}:${item}"
-  $BACKUP_RSYNC $BACKUP_RSYNC_OPTS "${BACKUP_RSYNC_OPTS[@]}" "${BACKUP_RSYNC_SSH_KEY[@]}" $remote_arg $dest_dir
+  remote_arg="${ASTROSTUFF_USER}@${ASTROSTUFF_HOSTNAME}:${item}"
+  rsync_cmd="${BACKUP_RSYNC} ${RSYNC_PATH_OPT} ${BACKUP_RSYNC_OPTS} ${BACKUP_EXCLUDES} ${RSYNC_SSH_KEY} $remote_arg $dest_dir"
+  eval $rsync_cmd
 }
 
-restore_item () {
-  # TO DO - Do this
-
+restore_item() {
   local item="$1"
-  local src_base="$2"
+  local source_base="$2"
   local target_base="$3"
   local use_sudo="$4"
 
+
   # Convert item to relative path (e.g. /etc/hosts -> ./etc/hosts)
-  local rel_item="./${item#/}"
-  local source_path="$src_base/$rel_item"
+  local source_path="${source_base}/${item}"
   local remote_dest="${ASTROSTUFF_USER}@${ASTROSTUFF_HOSTNAME}:${target_base}"
 
   if [ "$use_sudo" == "yes" ]; then
-    RSYNC_PATH_OPT=(--rsync-path "sudo rsync")
+    RSYNC_PATH_OPT="--rsync-path \"sudo rsync\""
+    RSYNC_CHOWN_OPT="--chown 0:0"
   else
     RSYNC_PATH_OPT=()
+    RSYNC_CHOWN_OPT="--chown 1000:1000"
   fi
 
   echo "Restoring item: $item"
   # Build the restore rsync command as an array.
-  $RSYNC $COMMON_OPTS "${RSYNC_PATH_OPT[@]}" "${RSYNC_SSH_OPT[@]}" $source_path $remote_dest
+  rsync_cmd="$BACKUP_RSYNC ${RSYNC_PATH_OPT} ${RESTORE_RSYNC_OPTS} ${RSYNC_CHOWN_OPT} ${RSYNC_SSH_KEY} $source_path $remote_dest"
+  eval "$rsync_cmd"
 }
 
 backup () {
   for item in "${BACKUP_USER_ITEMS[@]}"; do
-    backup_item "/home/${ASTROSTUFF_USER}/$item" "$BACKUP_DIR/user" "no"
+    backup_item "/home/${ASTROSTUFF_USER}/$item" "${ASTROSTUFF_BACKUP_DIR}/user" "no"
   done
   # Backup system items (which require sudo on the Pi)
   for item in "${BACKUP_SYSTEM_ITEMS[@]}"; do
-    backup_item "$item" "$BACKUP_DIR/system" "yes"
+    backup_item "$item" "$ASTROSTUFF_BACKUP_DIR/system" "yes"
   done
 }
 
 restore () {
-  for item in "${USER_ITEMS[@]}"; do
-    restore_item "$item" "$BACKUP_DIR/user" "/home/${ASTROSTUFF_USER}" "no"
-  done
-  # Restore system items (using sudo on the Pi)
-  for item in "${SYSTEM_ITEMS[@]}"; do
-    restore_item "$item" "$BACKUP_DIR/system" "/" "yes"
-  done
+    for f in ${ASTROSTUFF_BACKUP_DIR}/user/home/${ASTROSTUFF_USER}/*/; do
+      if [ -d "$f" ]; then
+        echo "User item: $f"
+        item=$(basename "$f")
+        restore_item "$item" "${ASTROSTUFF_BACKUP_DIR}/user/home/${ASTROSTUFF_USER}" "/home/${ASTROSTUFF_USER}/" "no"
+      fi
+    done
+    for f in ${ASTROSTUFF_BACKUP_DIR}/system/*/; do
+      echo "System item: $f"
+      if [ -d "$f" ]; then
+        item=$(basename "$f")
+        restore_item "$item" "${ASTROSTUFF_BACKUP_DIR}/system/" "/" "yes"
+      fi
+    done
 }
 
 deploy () {
@@ -486,7 +509,7 @@ case "${ASTROSTUFF_CLI_TOPIC}" in
     image
     ;;
   "backup")
-    deploy
+    backup
     ;;
   "restore")
     restore
