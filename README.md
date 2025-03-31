@@ -4,6 +4,8 @@ Astrostuff
 
 Create your own customised, pre-cooked Raspberry Pi images with astronomy software already installed.
 
+# About 
+
 Version 1.0.0, 2025-03-24
 
 
@@ -147,10 +149,10 @@ Ok, here's how to use Astrostuff with minimal changes. **But do read the caveat 
 	ASTROSTUFF_HOTSPOT_PASSWORD="astrostuff-password"
 	```
 	
-	This process will take several hours to complete, depending on the speed of 
-	your computer.
 	
 3. Run ```astrostuff full``` from the terminal. The scripts will take care of the rest.
+
+	This process will take several hours to complete, depending on the speed of your computer.
 
 4. Burn the .img file to an SD card and boot the Raspberry Pi. It should automatically
 connect to your home wifi (although a wired connection is recommended as the Pi's wifi 
@@ -199,7 +201,7 @@ The Astrostuff script takes 3 arguments:
 - a command
 - a repository/driver
 
-### ```astrostuff full```
+### Astrostuff full
 
 This is the "all-in-one" process. It deletes all previous docker data (images, containers,
 volumes), rebuilds the image, starts the container, clones, builds and packages
@@ -237,11 +239,11 @@ If ommitted, the script will run through every repository.
 * ```astrostuff astro package```: Packages the binaries as a .deb file;
 * ```astrostuff astro all```: Runs the entire build process from clone to package.
 
-## Astrostuff image
+### Astrostuff image
 
 Creates the Raspberry Pi .img file, ready for flashing to an SD card.
 
-## Astrostuff deploy
+### Astrostuff deploy
 
 Copies the packaged .deb files to the Astrostuff host and installs or re-installs them.
 
@@ -305,7 +307,7 @@ flag to the Cmake command and try again.
 Out of the box, Astrostuff will use approximately 45 Gb of disk space. Docker must be
 configured to allow at least that much space (64Gb recommended).
 
-The used disk usage is more or less as such:
+The disk usage is more or less as such:
 
 - Docker image: 3Gb;
 - Docker container: 1Gb;
@@ -341,11 +343,11 @@ being used. This is because different versions of Docker will use different Linu
 may impact the container's ability to compile the code against the correct arm64 architecture.
 * Moreover, Macbooks with Intel CPUs and Macbooks running Apple silicon are very different. Apple
 silicon is itself an ARM architecture, but Intel is not.
-* Due to the Cmake quirks described above the build may file occasionally. The ```-D``` flags passed to 
+* Due to the Cmake quirks described above the build may fail occasionally. The ```-D``` flags passed to 
 each Cmake command may need to be adjusted in your system.
 * If you rebuild the image, even if nothing changed, and flash the SD card with it Astrostuff's 
 signature will have changed. This will trigger security warnings when you connect to Astrostuff,
-whether via VNC or SSH.
+whether via VNC or SSH, because the server's signature has changed. That's usually ok and safe to connect to Astrostuff and update the signature.
 
 # Updates, support, etc.
 

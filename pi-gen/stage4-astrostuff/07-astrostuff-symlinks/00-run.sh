@@ -15,6 +15,7 @@ rm -rf ${ROOTFS_DIR}/home/${FIRST_USER_NAME}/.local/share/kstars/guidelogs
 rm -rf ${ROOTFS_DIR}/home/${FIRST_USER_NAME}/.local/share/kstars/focuslogs
 rm -rf ${ROOTFS_DIR}/home/${FIRST_USER_NAME}/.local/share/kstars/analyze
 rm -rf ${ROOTFS_DIR}/home/${FIRST_USER_NAME}/.local/share/kstars/astrometry
+rm -rf ${ROOTFS_DIR}/home/${FIRST_USER_NAME}/.indigo/astrometry
 
 mkdir -p ${ROOTFS_DIR}/home/${FIRST_USER_NAME}/.indi
 mkdir -p ${ROOTFS_DIR}/home/${FIRST_USER_NAME}/.local/share/kstars
@@ -25,3 +26,4 @@ ln -s /home/${FIRST_USER_NAME}/Logs/guide ${ROOTFS_DIR}/home/${FIRST_USER_NAME}/
 ln -s /home/${FIRST_USER_NAME}/Logs/focus ${ROOTFS_DIR}/home/${FIRST_USER_NAME}/.local/share/kstars/focuslogs
 ln -s /home/${FIRST_USER_NAME}/Logs/analyze ${ROOTFS_DIR}/home/${FIRST_USER_NAME}/.local/share/kstars/analyze
 ln -s /home/${FIRST_USER_NAME}/astrometry ${ROOTFS_DIR}/home/${FIRST_USER_NAME}/.local/share/kstars/astrometry
+ln -s /home/${FIRST_USER_NAME}/astrometry ${ROOTFS_DIR}/home/${FIRST_USER_NAME}/.indigo/astrometry
